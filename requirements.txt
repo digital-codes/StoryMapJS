@@ -7,4 +7,4 @@ huey==2.5.*
 oauth2client==4.1.*
 psycopg2-binary==2.9.*
 python-slugify==8.0.*
-requests==2.31.*
+requests==2.32.*
