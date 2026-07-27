@@ -33,6 +33,13 @@ except ImportError as e:
 
 settings = sys.modules[os.environ['FLASK_SETTINGS_MODULE']]
 settings.TEST_MODE = False
+# Tests run on the host, but settings default the DB host to the Docker-internal
+# name "pg". Rewrite it to localhost (the port is published to the host).
+try:
+    if settings.DATABASES['pg']['HOST'] == 'pg':
+        settings.DATABASES['pg']['HOST'] = 'localhost'
+except (AttributeError, KeyError, TypeError):
+    pass
 # Use the actual bucket from settings (uploads.knilab.com) instead of a test bucket
 # The bucket should be created by running scripts/makebuckets.sh
 if not os.environ.get('AWS_TEST_BUCKET'):
@@ -43,6 +50,69 @@ else:
 
 # Import storage module AFTER setting environment
 from storymap.storage import all_keys, save_from_data
+from storymap.connection import (pg_conn, create_user, get_user,
+    set_user_storymap_value, set_user_migrated, delete_user_storymap)
+
+
+@pytest.fixture
+def pg_user():
+    """Create a throwaway user in Postgres and clean it up afterwards."""
+    uid = 'itest-concurrent-writes'
+    db = pg_conn(settings)
+    with db.cursor() as cursor:
+        cursor.execute('DELETE FROM users WHERE uid=%s', (uid,))
+    db.commit()
+    create_user(uid, 'Integration Test', db=db, storymaps={
+        'map-a': {'id': 'map-a', 'title': 'A', 'draft_on': 't0', 'published_on': ''},
+        'map-b': {'id': 'map-b', 'title': 'B', 'draft_on': 't0', 'published_on': ''},
+    })
+    yield uid, db
+    with db.cursor() as cursor:
+        cursor.execute('DELETE FROM users WHERE uid=%s', (uid,))
+    db.commit()
+    db.close()
+
+
+@pytest.mark.integration
+def test_set_user_storymap_value_whole_key(pg_user):
+    """Writing a whole storymap entry must not disturb sibling entries."""
+    uid, db = pg_user
+    set_user_storymap_value(uid, ['map-c'],
+        {'id': 'map-c', 'title': 'C', 'draft_on': 't1', 'published_on': ''}, db=db)
+    maps = get_user(uid, db=db)['storymaps']
+    assert set(maps) == {'map-a', 'map-b', 'map-c'}
+    assert maps['map-c']['title'] == 'C'
+    assert maps['map-a']['title'] == 'A'  # untouched
+
+
+@pytest.mark.integration
+def test_set_user_storymap_value_single_field(pg_user):
+    """Writing one field must leave the entry's other fields and siblings intact."""
+    uid, db = pg_user
+    set_user_storymap_value(uid, ['map-a', 'published_on'], 't2', db=db)
+    maps = get_user(uid, db=db)['storymaps']
+    assert maps['map-a']['published_on'] == 't2'
+    assert maps['map-a']['title'] == 'A'      # other field intact
+    assert maps['map-b']['published_on'] == ''  # sibling intact
+
+
+@pytest.mark.integration
+def test_delete_user_storymap_removes_only_target(pg_user):
+    """Delete must remove exactly one key, leaving the rest of the account."""
+    uid, db = pg_user
+    delete_user_storymap(uid, 'map-a', db=db)
+    maps = get_user(uid, db=db)['storymaps']
+    assert set(maps) == {'map-b'}
+
+
+@pytest.mark.integration
+def test_set_user_migrated_leaves_storymaps_intact(pg_user):
+    """Flipping the migrated flag must not rewrite the storymaps column."""
+    uid, db = pg_user
+    set_user_migrated(uid, 1, db=db)
+    user = get_user(uid, db=db)
+    assert user['migrated'] == 1
+    assert set(user['storymaps']) == {'map-a', 'map-b'}
 
 
 @pytest.mark.integration

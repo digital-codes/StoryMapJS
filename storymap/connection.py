@@ -112,6 +112,47 @@ def save_user(user, *, db):
     save_pg_user(user, db=db)
 
 
+def delete_user_storymap(uid, storymap_id, *, db):
+    """Atomically remove a single storymap key from a user's storymaps JSONB.
+
+    Uses the JSONB `-` operator so only this key is touched, rather than
+    rewriting the whole `storymaps` column from an in-memory snapshot (which
+    a concurrent save could clobber).
+    """
+    with db.cursor() as cursor:
+        cursor.execute(
+            "UPDATE users SET storymaps = storymaps - %(id)s "
+            "WHERE uid = %(uid)s;",
+            {'id': storymap_id, 'uid': uid})
+    db.commit()
+
+
+def set_user_storymap_value(uid, path, value, *, db):
+    """Atomically set storymaps#>path = value for one user, via jsonb_set.
+
+    `path` is a list of JSON keys, e.g. ['my-map'] to write a whole storymap
+    entry or ['my-map', 'draft_on'] to write a single field. Only that path is
+    written; the rest of the storymaps column is untouched, so a concurrent
+    write to a different storymap (or a different field) cannot clobber it.
+    """
+    with db.cursor() as cursor:
+        cursor.execute(
+            "UPDATE users SET storymaps = jsonb_set("
+            "coalesce(storymaps, '{}'::jsonb), %(path)s::text[], "
+            "%(value)s::jsonb, true) WHERE uid = %(uid)s;",
+            {'path': list(path), 'value': json.dumps(value), 'uid': uid})
+    db.commit()
+
+
+def set_user_migrated(uid, migrated, *, db):
+    """Atomically set the `migrated` flag without rewriting other columns."""
+    with db.cursor() as cursor:
+        cursor.execute(
+            "UPDATE users SET migrated = %(migrated)s WHERE uid = %(uid)s;",
+            {'migrated': migrated, 'uid': uid})
+    db.commit()
+
+
 def find_users(*, db, uname=None, uname__like=None, uid=None, migrated=None,
         limit=DEFAULT_USER_QUERY_LIMIT, offset=0):
     """NOTE: currently does not properly handle an all-users search. Must

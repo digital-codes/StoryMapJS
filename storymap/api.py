@@ -40,7 +40,8 @@ import hashlib
 import requests
 import slugify
 from oauth2client.client import OAuth2WebServerFlow
-from .connection import get_user, save_user, create_user, find_users, pg_conn
+from .connection import (get_user, save_user, create_user, find_users, pg_conn,
+    delete_user_storymap, set_user_storymap_value, set_user_migrated)
 from . import googleauth
 from . import storage
 
@@ -477,7 +478,7 @@ def storymap_update_meta(user, id):
         key, value = _request_get_required('key', 'value')
 
         user['storymaps'][id][key] = value
-        save_user(user, db=db())
+        set_user_storymap_value(user['uid'], [id, key], value, db=db())
 
         key_prefix = storage.key_prefix(user['uid'], id)
 
@@ -621,7 +622,7 @@ def storymap_copy(user, id):
             'draft_on': user['storymaps'][id]['draft_on'],
             'published_on': user['storymaps'][id]['published_on']
         }
-        save_user(user, db=db())
+        set_user_storymap_value(user['uid'], [dst_id], user['storymaps'][dst_id], db=db())
         # Write new embed pages
         _write_embed_draft(dst_key_prefix, user['storymaps'][dst_id])
         if user['storymaps'][dst_id].get('published_on'):
@@ -642,9 +643,12 @@ def storymap_delete(user, id):
     """Delete storymap"""
     storymap_id = id
     try:
-        storymap_cleanup(user["uid"], storymap_id)
+        # Commit the metadata removal FIRST, atomically (single JSONB key),
+        # then enqueue the S3 cleanup. If the DB delete fails, cleanup is never
+        # queued, so we never orphan the account record from its S3 objects.
         del user['storymaps'][storymap_id]
-        save_user(user, db=db())
+        delete_user_storymap(user['uid'], storymap_id, db=db())
+        storymap_cleanup(user["uid"], storymap_id)
         return jsonify({})
     except storage.StorageException as e:
         traceback.print_exc()
@@ -670,7 +674,7 @@ def storymap_create(user):
             'draft_on': _utc_now(),
             'published_on': ''
         }
-        save_user(user, db=db())
+        set_user_storymap_value(user['uid'], [id], user['storymaps'][id], db=db())
         _write_embed_draft(key_prefix, user['storymaps'][id])
         return jsonify({'id': id})
     except storage.StorageException as e:
@@ -687,7 +691,7 @@ def storymap_migrate_done(user):
     """Flag user as migrated"""
     try:
         user['migrated'] = 1
-        save_user(user, db=db())
+        set_user_migrated(user['uid'], 1, db=db())
         return jsonify({})
     except Exception as e:
         traceback.print_exc()
@@ -758,7 +762,7 @@ def storymap_migrate(user):
             'draft_on': draft_on,
             'published_on': published_on
         }
-        save_user(user, db=db())
+        set_user_storymap_value(user['uid'], [dst_id], user['storymaps'][dst_id], db=db())
         _write_embed_draft(dst_key_prefix, user['storymaps'][dst_id])
         if published_on:
             _write_embed_published(dst_key_prefix, user['storymaps'][dst_id])
@@ -831,7 +835,8 @@ def storymap_save(user, id):
                 time.sleep(retry_delay_seconds)
 
         user['storymaps'][id]['draft_on'] = _utc_now()
-        save_user(user, db=db())
+        set_user_storymap_value(user['uid'], [id, 'draft_on'],
+            user['storymaps'][id]['draft_on'], db=db())
         return jsonify({'meta': user['storymaps'][id]})
     except storage.StorageException as e:
         traceback.print_exc()
@@ -855,7 +860,8 @@ def storymap_publish(user, id):
         storage.save_json(key_prefix+'published.json', content)
 
         user['storymaps'][id]['published_on'] = _utc_now()
-        save_user(user, db=db())
+        set_user_storymap_value(user['uid'], [id, 'published_on'],
+            user['storymaps'][id]['published_on'], db=db())
         _write_embed_published(key_prefix, user['storymaps'][id])
 
         return jsonify({'meta': user['storymaps'][id]})
