@@ -39,12 +39,109 @@ def api_client(monkeypatch):
         lambda uid, db=None: test_user if uid == test_user['uid'] else None,
     )
     monkeypatch.setattr(api, 'save_user', lambda user, db=None: None)
+    monkeypatch.setattr(
+        api, 'set_user_storymap_value', lambda uid, path, value, db=None: None)
     monkeypatch.setattr(api, '_utc_now', lambda: '2024-01-02T00:00:00Z')
 
     with api.app.test_client() as client:
         with client.session_transaction() as session:
             session['uid'] = test_user['uid']
         yield client, test_user
+
+
+def _delete_client(monkeypatch, storymaps):
+    """Flask test client whose session user has the given storymaps dict."""
+    test_user = {
+        'uid': 'user-123',
+        'uname': 'Test User',
+        'storymaps': storymaps,
+    }
+    monkeypatch.setattr(api, 'db', lambda: None)
+    monkeypatch.setattr(
+        api,
+        'get_user',
+        lambda uid, db=None: test_user if uid == test_user['uid'] else None,
+    )
+    client = api.app.test_client()
+    with client.session_transaction() as session:
+        session['uid'] = test_user['uid']
+    return client, test_user
+
+
+@pytest.mark.unit
+def test_storymap_delete_commits_metadata_before_cleanup(monkeypatch):
+    """Delete must remove the DB record BEFORE enqueuing S3 cleanup, and must
+    only touch the targeted storymap key."""
+    client, user = _delete_client(monkeypatch, {
+        'map-123': {'id': 'map-123', 'title': 'Doomed', 'published_on': ''},
+        'map-456': {'id': 'map-456', 'title': 'Keep me', 'published_on': ''},
+    })
+
+    calls = []
+    monkeypatch.setattr(
+        api, 'delete_user_storymap',
+        lambda uid, sid, db=None: calls.append(('delete_meta', uid, sid)))
+    monkeypatch.setattr(
+        api, 'storymap_cleanup',
+        lambda uid, sid: calls.append(('cleanup', uid, sid)))
+
+    response = client.get('/storymap/delete/?id=map-123')
+
+    assert response.status_code == 200
+    # Both ran, targeting the right key, and metadata delete came first.
+    assert calls == [
+        ('delete_meta', 'user-123', 'map-123'),
+        ('cleanup', 'user-123', 'map-123'),
+    ]
+    # The other storymap is untouched.
+    assert 'map-456' in user['storymaps']
+
+
+@pytest.mark.unit
+def test_storymap_delete_does_not_cleanup_when_metadata_delete_fails(monkeypatch):
+    """If the DB removal raises, S3 cleanup must NOT be enqueued — otherwise we
+    orphan the account record from its (now-deleted) S3 objects."""
+    client, _ = _delete_client(monkeypatch, {
+        'map-123': {'id': 'map-123', 'title': 'Doomed', 'published_on': ''},
+    })
+
+    cleanup_calls = []
+
+    def boom(uid, sid, db=None):
+        raise Exception('db unavailable')
+
+    monkeypatch.setattr(api, 'delete_user_storymap', boom)
+    monkeypatch.setattr(
+        api, 'storymap_cleanup',
+        lambda uid, sid: cleanup_calls.append((uid, sid)))
+
+    response = client.get('/storymap/delete/?id=map-123')
+
+    assert response.status_code == 200
+    assert response.get_json().get('error')
+    assert cleanup_calls == [], 'cleanup must not run when the DB delete fails'
+
+
+@pytest.mark.unit
+def test_storymap_save_writes_only_its_field_atomically(api_client, monkeypatch):
+    """A save must persist just the draft_on field via the per-key atomic helper,
+    never a whole-blob save_user (which could clobber a concurrent write)."""
+    client, _ = api_client
+
+    writes = []
+    monkeypatch.setattr(
+        api, 'set_user_storymap_value',
+        lambda uid, path, value, db=None: writes.append((uid, path, value)))
+    monkeypatch.setattr(
+        api, 'save_user',
+        lambda *a, **k: pytest.fail('save_user must not be used to persist a save'))
+    monkeypatch.setattr(api.storage, 'save_json', lambda key_name, content: None)
+
+    response = client.post(
+        '/storymap/save/', data={'id': 'map-123', 'd': json.dumps({'slides': []})})
+
+    assert response.status_code == 200
+    assert writes == [('user-123', ['map-123', 'draft_on'], '2024-01-02T00:00:00Z')]
 
 
 @pytest.mark.unit
