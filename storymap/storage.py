@@ -79,18 +79,18 @@ retry_config = boto3.session.Config(
     read_timeout=60          # Read timeout in seconds
 )
 
+# Credentials come from boto3's default provider chain rather than being passed
+# explicitly: environment variables in local development (docker-compose sets
+# dummy values for localstack), the EC2 instance role via IMDS in production.
+# Role credentials include a session token and expire, so they must not be
+# overridden here -- botocore refreshes them transparently.
 _conn = boto3.client('s3',
         verify=ssl_verify,
         endpoint_url=endpoint,
-        config=retry_config,
-        aws_session_token=None,
-        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY)
-session = boto3.session.Session(
-        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY)
+        config=retry_config)
+session = boto3.session.Session()
 s3 = session.resource('s3', verify=ssl_verify, endpoint_url=endpoint,
-    aws_session_token=None, config=retry_config)
+    config=retry_config)
 _bucket = s3.Bucket(settings.AWS_STORAGE_BUCKET_NAME)
 
 
