@@ -30,6 +30,7 @@ init_env_common:
   AWS_STORAGE_BUCKET_NAME: "{{ vault_aws_storage_bucket_name }}"
   AWS_STORAGE_BUCKET_URL: "{{ vault_aws_storage_bucket_url }}"
   AWS_STORAGE_BUCKET_KEY: "{{ vault_aws_storage_bucket_key }}"
+  AWS_DEFAULT_REGION: "us-east-1"
   AWS_ACCESS_KEY_ID: "{{ vault_aws_access_key_id }}"
   AWS_SECRET_ACCESS_KEY: "{{ vault_aws_secret_access_key }}"
   GOOGLE_CLIENT_ID: "{{ vault_google_client_id }}"
